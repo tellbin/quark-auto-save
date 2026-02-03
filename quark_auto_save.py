@@ -96,20 +96,26 @@ class Config:
         PLUGIN_FLAGS = os.environ.get("PLUGIN_FLAGS", "").split(",")
         plugins_available = {}
         task_plugins_config = {}
+        # 获取所有模块
+        py_ext = [".py", ".pyd"] if sys.platform == "win32" else [".py", ".so"]
         all_modules = [
-            f.replace(".py", "") for f in os.listdir(plugins_dir) if f.endswith(".py")
+            f.replace(ext, "")
+            for f in os.listdir(plugins_dir)
+            for ext in py_ext
+            if f.endswith(ext)
         ]
         # 调整模块优先级
         priority_path = os.path.join(plugins_dir, "_priority.json")
         try:
             with open(priority_path, encoding="utf-8") as f:
                 priority_modules = json.load(f)
-            if priority_modules:
-                all_modules = [
-                    module for module in priority_modules if module in all_modules
-                ] + [module for module in all_modules if module not in priority_modules]
         except (FileNotFoundError, json.JSONDecodeError):
             priority_modules = []
+        if priority_modules:
+            all_modules = [
+                module for module in priority_modules if module in all_modules
+            ] + [module for module in all_modules if module not in priority_modules]
+        # 加载模块
         for module_name in all_modules:
             if f"-{module_name}" in PLUGIN_FLAGS:
                 continue
@@ -567,6 +573,8 @@ class Quark:
                 "_fetch_sub_dirs": "0",
                 "_sort": "file_type:asc,updated_at:desc",
                 "_fetch_full_path": kwargs.get("fetch_full_path", 0),
+                "fetch_all_file": 1,  # 跟随Web端，作用未知
+                "fetch_risk_file_name": 1,  # 如无此参数，违规文件名会被变 ***
             }
             response = self._send_request("GET", url, params=querystring).json()
             if response["code"] != 0:
@@ -619,6 +627,8 @@ class Quark:
                 "__t": datetime.now().timestamp(),
             }
             response = self._send_request("GET", url, params=querystring).json()
+            if response["status"] != 200:
+                return response
             if response["data"]["status"] == 2:
                 if retry_index > 0:
                     print()
@@ -994,22 +1004,23 @@ class Quark:
                     err_msg = save_file_return["message"]
                 if err_msg:
                     add_notify(f"❌《{task['taskname']}》转存失败：{err_msg}\n")
-        # 建立目录树
-        for index, item in enumerate(need_save_list):
-            icon = self._get_file_icon(item)
-            tree.create_node(
-                f"{icon}{item['file_name_re']}",
-                item["fid"],
-                parent=pdir_fid,
-                data={
-                    "file_name": item["file_name"],
-                    "file_name_re": item["file_name_re"],
-                    "fid": f"{save_as_top_fids[index]}",
-                    "path": f"{savepath}/{item['file_name_re']}",
-                    "is_dir": item["dir"],
-                    "obj_category": item.get("obj_category", ""),
-                },
-            )
+            # 建立目录树
+            if len(need_save_list) == len(save_as_top_fids):
+                for index, item in enumerate(need_save_list):
+                    icon = self._get_file_icon(item)
+                    tree.create_node(
+                        f"{icon}{item['file_name_re']}",
+                        item["fid"],
+                        parent=pdir_fid,
+                        data={
+                            "file_name": item["file_name"],
+                            "file_name_re": item["file_name_re"],
+                            "fid": f"{save_as_top_fids[index]}",
+                            "path": f"{savepath}/{item['file_name_re']}",
+                            "is_dir": item["dir"],
+                            "obj_category": item.get("obj_category", ""),
+                        },
+                    )
         return tree
 
     def do_rename(self, tree, node_id=None):
@@ -1073,7 +1084,13 @@ def do_sign(account):
     # 每日领空间
     growth_info = account.get_growth_info()
     if growth_info:
-        growth_message = f"💾 {'88VIP' if growth_info['88VIP'] else '普通用户'} 总空间：{format_bytes(growth_info['total_capacity'])}，签到累计获得：{format_bytes(growth_info['cap_composition'].get('sign_reward', 0))}"
+        VIP_MAP = {
+            "NORMAL": "普通用户",
+            "EXP_SVIP": "88VIP",
+            "SUPER_VIP": "SVIP",
+            "Z_VIP": "SVIP+",
+        }
+        growth_message = f"💾 {VIP_MAP.get(growth_info['member_type'], growth_info['member_type'])} 总空间：{format_bytes(growth_info['total_capacity'])}，签到累计获得：{format_bytes(growth_info['cap_composition'].get('sign_reward', 0))}"
         if growth_info["cap_sign"]["sign_daily"]:
             sign_message = f"📅 签到记录: 今日已签到+{int(growth_info['cap_sign']['sign_daily_reward']/1024/1024)}MB，连签进度({growth_info['cap_sign']['sign_progress']}/{growth_info['cap_sign']['sign_target']})✅"
             message = f"{sign_message}\n{growth_message}"
@@ -1104,6 +1121,7 @@ def do_save(account, tasklist=[]):
     plugins, CONFIG_DATA["plugins"], task_plugins_config = Config.load_plugins(
         CONFIG_DATA.get("plugins", {})
     )
+    print()
     print(f"转存账号: {account.nickname}")
     # 获取全部保存目录fid
     account.update_savepath_fid(tasklist)
@@ -1120,6 +1138,12 @@ def do_save(account, tasklist=[]):
             # 星期一为0，星期日为6
             or (datetime.today().weekday() + 1 in task.get("runweek"))
         )
+
+    for plugin_name, plugin in plugins.items():
+        if plugin.is_active and hasattr(plugin, "task_before"):
+            tasklist = (
+                plugin.task_before(tasklist=tasklist, account=account) or tasklist
+            )
 
     # 执行任务
     for index, task in enumerate(tasklist):
@@ -1166,10 +1190,19 @@ def do_save(account, tasklist=[]):
             if is_new_tree:
                 print(f"🧩 调用插件")
                 for plugin_name, plugin in plugins.items():
-                    if plugin.is_active:
+                    if plugin.is_active and hasattr(plugin, "run"):
                         task = (
                             plugin.run(task, account=account, tree=is_new_tree) or task
                         )
+    print()
+    print(f"===============插件收尾===============")
+    for plugin_name, plugin in plugins.items():
+        if plugin.is_active and hasattr(plugin, "task_after"):
+            data = plugin.task_after(tasklist=tasklist, account=account)
+            if data.get("tasklist"):
+                CONFIG_DATA["tasklist"] = data["tasklist"]
+            if data.get("config"):
+                CONFIG_DATA["plugins"][plugin_name] = data["config"]
     print()
 
 

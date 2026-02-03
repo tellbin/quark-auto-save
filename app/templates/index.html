@@ -310,9 +310,10 @@
                     </div>
                   </div>
                   <div class="col-auto">
-                    <button class="btn btn-warning" v-if="task.shareurl_ban" :title="task.shareurl_ban" disabled><i class="bi bi-exclamation-triangle-fill"></i></button>
-                    <button type="button" class="btn btn-outline-primary" @click="runScriptNow(index)" title="运行此任务" v-else><i class="bi bi-play-fill"></i></button>
-                    <button type="button" class="btn btn-outline-danger" @click="removeTask(index)" title="删除此任务"><i class="bi bi-trash3-fill"></i></button>
+                    <button type="button" class="btn btn-outline-primary btn-sm" @click="copyTaskToClipboard(index)" title="复制任务参数到粘贴板"><i class=" bi bi-clipboard-check-fill"></i></button>
+                    <button class="btn btn-warning btn-sm" v-if="task.shareurl_ban" :title="task.shareurl_ban" disabled><i class="bi bi-exclamation-triangle-fill"></i></button>
+                    <button type="button" class="btn btn-outline-primary btn-sm" @click="runScriptNow(index)" title="运行此任务" v-else><i class="bi bi-play-fill"></i></button>
+                    <button type="button" class="btn btn-outline-danger btn-sm" @click="removeTask(index)" title="删除此任务"><i class="bi bi-trash3-fill"></i></button>
                   </div>
                 </div>
                 <div class="collapse ml-3" :id="'collapse_'+index">
@@ -379,7 +380,7 @@
                         <div class="input-group-prepend">
                           <button class="btn btn-outline-secondary" type="button" @click="fileSelect.selectDir=true;fileSelect.switchShare=false;fileSelect.previewRegex=true;fileSelect.sortBy='file_name';fileSelect.sortOrder='asc';showShareSelect(index)" title="预览正则处理效果">正则处理</button>
                         </div>
-                        <input type="text" name="pattern[]" class="form-control" v-model="task.pattern" placeholder="匹配表达式" list="magicRegex">
+                        <input type="text" name="pattern[]" class="form-control" v-model="task.pattern" placeholder="匹配表达式" list="magicRegex" @dblclick="inputRawMagicRegex(task)" title="双击可将魔法匹配释放为填入原始正则表达式">
                         <input type="text" name="replace[]" class="form-control" v-model="task.replace" placeholder="替换表达式">
                         <div class="input-group-append" title="保存时只比较文件名的部分，01.mp4 和 01.mkv 视同为同一文件，不重复转存">
                           <div class="input-group-text">
@@ -446,7 +447,10 @@
             </div>
             <div class="row mt-5">
               <div class="col-sm-12 text-center">
-                <button type="button" class="btn btn-primary" @click="addTask()"><i class="bi bi-plus"></i> 增加任务</button>
+                <div class="btn-group" role="group" aria-label="任务操作">
+                  <button type="button" class="btn btn-primary" @click="addTask()"><i class="bi bi-plus"></i> 增加任务</button>
+                  <button type="button" class="btn btn-primary" @click="addTaskForClipboard()" title="从粘贴板导入"><i class="bi bi-clipboard-plus"></i></button>
+                </div>
               </div>
             </div>
           </div>
@@ -592,6 +596,19 @@
         </div>
       </div>
     </div>
+
+    <!-- Toast 提示 -->
+    <div class="toast-container">
+      <div v-for="toast in toasts" :key="toast.id" class="toast show shadow-sm" :class="toast.type" role="alert" aria-live="assertive" aria-atomic="true">
+        <div class="toast-body d-flex align-items-center">
+          <i class="bi mr-2" :class="getToastIcon(toast.type)"></i>
+          <span>{{ toast.message }}</span>
+          <button type="button" class="ml-auto close" @click="removeToast(toast.id)" aria-label="Close">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 
 
@@ -624,6 +641,7 @@
             }
           },
         },
+        toasts: [],
         newTask: {
           taskname: "",
           shareurl: "",
@@ -799,8 +817,10 @@
             .then(response => {
               if (response.data.success) {
                 this.configModified = false;
+                this.showToast(response.data.message, 'success');
+              } else {
+                this.showToast(response.data.message, 'error');
               }
-              alert(response.data.message);
               console.log('Config saved result:', response.data);
             })
             .catch(error => {
@@ -1063,7 +1083,7 @@
         updateMagicRegexKey(oldKey, newKey) {
           if (oldKey !== newKey) {
             if (this.formData.magic_regex[newKey]) {
-              alert(`魔法名 [${newKey}] 已存在，请使用其他名称`);
+              this.showToast(`魔法名 [${newKey}] 已存在，请使用其他名称`, 'warning');
               return;
             }
             this.$set(this.formData.magic_regex, newKey, this.formData.magic_regex[oldKey]);
@@ -1083,7 +1103,7 @@
               if (response.data.code == 0) {
                 this.fileSelect.fileList = this.fileSelect.fileList.filter(item => item.fid != fid);
               } else {
-                alert('删除失败：' + response.data.message);
+                this.showToast('删除失败：' + response.data.message, 'error');
               }
             }).catch(error => {
               console.error('Error /delete_file:', error);
@@ -1166,9 +1186,9 @@
           currentIndex = this.smart_param.taskSuggestions.data.indexOf(this.fileSelect.share);
           nextIndex = currentIndex + index;
           if (nextIndex < 0) {
-            alert("没有上一个啦");
+            this.showToast("没有上一个啦", "info");
           } else if (nextIndex >= this.smart_param.taskSuggestions.data.length) {
-            alert("没有下一个啦");
+            this.showToast("没有下一个啦", "info");
           } else {
             this.fileSelect.error = "";
             this.fileSelect.stoken = "";
@@ -1245,7 +1265,86 @@
             if (valA > valB) return this.fileSelect.sortOrder === "asc" ? 1 : -1;
             return 0;
           });
-        }
+        },
+        inputRawMagicRegex(task) {
+          const item = this.formData.magic_regex[task.pattern];
+          if (item) {
+            task.pattern = item.pattern;
+            task.replace = item.replace;
+          }
+        },
+        copyText(text, callback = () => { }) {
+          if (!text) {
+            console.error('No text to copy');
+            return;
+          }
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text);
+          } else {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.top = '0';
+            textarea.style.left = '0';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            textarea.setSelectionRange(0, 99999);
+            document.execCommand("copy");
+            document.body.removeChild(textarea);
+          }
+          callback()
+        },
+        copyTaskToClipboard(index) {
+          const task = { ...this.formData.tasklist[index] };
+          delete task.addition;
+          const _this = this;
+          this.copyText(JSON.stringify(task), function () {
+            _this.showToast("任务参数已复制到剪贴板", "success");
+          });
+        },
+        async addTaskForClipboard() {
+          text = null
+          try {
+            text = await navigator.clipboard.readText();
+          } catch (error) {
+            text = prompt("当前环境不支持自动读取粘贴板，请手动粘贴任务参数", "");
+          }
+          if (text) {
+            try {
+              let task = JSON.parse(text);
+              task = { ...this.newTask, ...task };
+              this.formData.tasklist.push(task);
+              this.showToast("剪贴板参数已成功导入任务", "success");
+              // 滚到最下
+              setTimeout(() => {
+                $('#collapse_' + (this.formData.tasklist.length - 1)).collapse('show').on('shown.bs.collapse', () => {
+                  this.scrollToX();
+                });
+              }, 1);
+            } catch (error) {
+              this.showToast("解析剪贴板内容失败", "error");
+            }
+          }
+        },
+        showToast(message, type = 'info', duration = 3000) {
+          const id = Date.now();
+          this.toasts.push({ id, message, type });
+          setTimeout(() => {
+            this.removeToast(id);
+          }, duration);
+        },
+        removeToast(id) {
+          this.toasts = this.toasts.filter(t => t.id !== id);
+        },
+        getToastIcon(type) {
+          switch (type) {
+            case 'success': return 'bi-check-circle-fill text-success';
+            case 'error': return 'bi-exclamation-circle-fill text-danger';
+            case 'warning': return 'bi-exclamation-triangle-fill text-warning';
+            default: return 'bi-info-circle-fill text-info';
+          }
+        },
       }
     });
   </script>
